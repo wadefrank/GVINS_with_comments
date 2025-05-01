@@ -15,6 +15,14 @@ const int NUM_OF_CAM = 1;
 const int NUM_OF_F = 1000;
 //#define UNIT_SPHERE_ERROR
 
+/**
+ * extern用法：
+ * 1.extern 只是声明而非定义变量，不会分配存储空间
+ * 2.在头文件中使用 extern 声明全局变量时，应在某个源文件中提供定义
+ * 3.extern 不能用于类成员变量或静态变量的声明
+ * 4.函数声明默认就是 extern 的，所以通常不需要显式写出
+ */
+
 extern double INIT_DEPTH;
 extern double MIN_PARALLAX;
 extern int ESTIMATE_EXTRINSIC;

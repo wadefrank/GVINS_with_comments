@@ -35,64 +35,95 @@ std::mutex m_state;
 std::mutex i_buf;
 std::mutex m_estimator;
 
-double latest_time;
-Eigen::Vector3d tmp_P;
-Eigen::Quaterniond tmp_Q;
-Eigen::Vector3d tmp_V;
-Eigen::Vector3d tmp_Ba;
-Eigen::Vector3d tmp_Bg;
-Eigen::Vector3d acc_0;
-Eigen::Vector3d gyr_0;
-bool init_feature = 0;
-bool init_imu = 1;
-double last_imu_t = -1;
+/*** IMU预积分相关参数 ***/
+double latest_time;             // 上一帧IMU数据的时间戳（用于IMU预积分）
+Eigen::Vector3d tmp_P;          // 平移（临时量）
+Eigen::Quaterniond tmp_Q;       // 旋转（临时量）
+Eigen::Vector3d tmp_V;          // 速度（临时量）
+Eigen::Vector3d tmp_Ba;         // IMU加速度计偏置（临时量）
+Eigen::Vector3d tmp_Bg;         // IMU陀螺仪偏置（临时量）
+Eigen::Vector3d acc_0;          // 上一帧IMU加速度测量值
+Eigen::Vector3d gyr_0;          // 上一帧IMU角速度测量值
+bool init_feature = 0;          // 未使用
+bool init_imu = 1;              // 是否是第一帧IMU数据
+double last_imu_t = -1;         //  上一帧IMU数据的时间戳（用于判断IMU数据时间是否正常，初始值为-1）
 
-std::mutex m_time;
-double next_pulse_time;
-bool next_pulse_time_valid;
-double time_diff_gnss_local;
-bool time_diff_valid;
-double latest_gnss_time;
-double tmp_last_feature_time;
-uint64_t feature_msg_counter;
+std::mutex m_time;              // PPS互斥锁
+double next_pulse_time;         // PPS触发时间
+bool next_pulse_time_valid;     // 如果进入PPS触发的回调函数gnss_tp_info_callback，那么这个就会设置成true
+double time_diff_gnss_local;    // 时间改正数：PPS触发时，VI传感器的本地时间和GPS时间的差值
+bool time_diff_valid;           // 如果这个是false，则对于收到的gnss观测数据直接不会存储
+double latest_gnss_time;        // 上一帧GNSS数据的时间戳（初始值为-1）
+double tmp_last_feature_time;   // 上一帧图像特征数据的时间戳（初始值为-1）
+uint64_t feature_msg_counter;   // 图像特征消息计数
 int skip_parameter;
 
+/**
+ * @brief 基于IMU测量数据进行PVQ状态预测（位置、速度、姿态）
+ * 
+ * @details 本函数实现惯性导航的机械编排(Mechanical Alignment)，通过积分IMU的角速度和线加速度数据，
+ *          更新载体的姿态、速度和位置预测值。通常用于组合导航或视觉惯性里程计(VIO)的预测步骤。
+ * 
+ * @param[in] imu_msg IMU消息，包含线加速度和角速度测量值（传感器坐标系下）
+ */
 void predict(const sensor_msgs::ImuConstPtr &imu_msg)
 {
+    // 1.处理IMU时间戳
+    // 获取当前IMU时间戳（转换为秒）
     double t = imu_msg->header.stamp.toSec();
+
+    // 记录第一帧IMU时间戳
     if (init_imu)
     {
         latest_time = t;
         init_imu = 0;
         return;
     }
+
+    // 计算两次IMU测量的时间间隔（单位：秒）
     double dt = t - latest_time;
+
+    // 更新上一帧IMU数据的时间戳
     latest_time = t;
 
+    
+    // 2.提取IMU测量值（传感器坐标系下）
+    // 线加速度（m/s²）
     double dx = imu_msg->linear_acceleration.x;
     double dy = imu_msg->linear_acceleration.y;
     double dz = imu_msg->linear_acceleration.z;
     Eigen::Vector3d linear_acceleration{dx, dy, dz};
 
+    // 角速度（rad/s）
     double rx = imu_msg->angular_velocity.x;
     double ry = imu_msg->angular_velocity.y;
     double rz = imu_msg->angular_velocity.z;
     Eigen::Vector3d angular_velocity{rx, ry, rz};
 
+    // 3.状态更新
+    // 计算校正后的上一帧IMU加速度
     Eigen::Vector3d un_acc_0 = tmp_Q * (acc_0 - tmp_Ba) - estimator_ptr->g;
-
+    // 计算校正后的角速度（中值积分）
     Eigen::Vector3d un_gyr = 0.5 * (gyr_0 + angular_velocity) - tmp_Bg;
+
+    // 3.1 姿态更新：q_{k+1} = q_k ⊗ Δq(ω*dt)
     tmp_Q = tmp_Q * Utility::deltaQ(un_gyr * dt);
 
+    // 计算校正后的当前IMU加速度
     Eigen::Vector3d un_acc_1 = tmp_Q * (linear_acceleration - tmp_Ba) - estimator_ptr->g;
 
+    // 校正后的加速度中值积分
     Eigen::Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
 
+    // 3.2 位置更新：P_{k+1} = P_k + V_k*dt + 0.5*a*dt²（二阶泰勒展开）
     tmp_P = tmp_P + dt * tmp_V + 0.5 * dt * dt * un_acc;
+    
+    // 3.3 速度更新：V_{k+1} = V_k + a*dt
     tmp_V = tmp_V + dt * un_acc;
 
-    acc_0 = linear_acceleration;
-    gyr_0 = angular_velocity;
+    // 4.缓存当前IMU测量值用于下一帧计算
+    acc_0 = linear_acceleration;    // 缓存当前加速度
+    gyr_0 = angular_velocity;       // 缓存当前角速度
 }
 
 void update()
@@ -113,8 +144,7 @@ void update()
 
 }
 
-bool
-getMeasurements(std::vector<sensor_msgs::ImuConstPtr> &imu_msg, sensor_msgs::PointCloudConstPtr &img_msg, std::vector<ObsPtr> &gnss_msg)
+bool getMeasurements(std::vector<sensor_msgs::ImuConstPtr> &imu_msg, sensor_msgs::PointCloudConstPtr &img_msg, std::vector<ObsPtr> &gnss_msg)
 {
     if (imu_buf.empty() || feature_buf.empty() || (GNSS_ENABLE && gnss_meas_buf.empty()))
         return false;
@@ -172,6 +202,11 @@ getMeasurements(std::vector<sensor_msgs::ImuConstPtr> &imu_msg, sensor_msgs::Poi
     return true;
 }
 
+/**
+ * @brief Imu消息存进imu_buf，同时按照imu频率（200Hz）预测predict位姿并发送(IMU状态递推并发布[P,Q,V,header])，提高里程计频率
+ * 
+ * @param imu_msg Imu消息的智能指针
+ */
 void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
 {
     if (imu_msg->header.stamp.toSec() <= last_imu_t)
@@ -198,15 +233,31 @@ void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
     }
 }
 
+/**
+ * @brief 订阅星历信息（GPS, Galileo, BeiDou）
+ * 
+ * @details 1.把ROS消息转成星历Ephem的数据结构
+ *          2.把星历的数据结构存储到estimator的成员变量中
+ * 
+ * @param ephem_msg GnssEphemMsg消息的智能指针
+ */
 void gnss_ephem_callback(const GnssEphemMsgConstPtr &ephem_msg)
 {
-    EphemPtr ephem = msg2ephem(ephem_msg);
+    EphemPtr ephem = msg2ephem(ephem_msg);  //将ROS星历信息，转换成相应的Ephem数据
     estimator_ptr->inputEphem(ephem);
 }
 
+/**
+ * @brief 订阅星历信息（GLONASS）
+ * 
+ * @details 1.把ROS消息转成星历Ephem的数据结构
+ *          2.把星历的数据结构存储到estimator的成员变量中
+ * 
+ * @param ephem_msg GnssGloEphemMsg消息的智能指针
+ */
 void gnss_glo_ephem_callback(const GnssGloEphemMsgConstPtr &glo_ephem_msg)
 {
-    GloEphemPtr glo_ephem = msg2glo_ephem(glo_ephem_msg);
+    GloEphemPtr glo_ephem = msg2glo_ephem(glo_ephem_msg);   //将ROS星历信息，转换成相应的Ephem数据
     estimator_ptr->inputEphem(glo_ephem);
 }
 
@@ -234,6 +285,11 @@ void gnss_meas_callback(const GnssMeasMsgConstPtr &meas_msg)
     con.notify_one();
 }
 
+/**
+ * @brief feature回调函数，将feature_msg放入feature_buf
+ * 
+ * @param feature_msg 
+ */
 void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
 {
     ++ feature_msg_counter;
@@ -241,6 +297,8 @@ void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
     if (skip_parameter < 0 && time_diff_valid)
     {
         const double this_feature_ts = feature_msg->header.stamp.toSec()+time_diff_gnss_local;
+        
+        // 如果已经接收到GNSS数据和图像特征数据，进行时间对齐
         if (latest_gnss_time > 0 && tmp_last_feature_time > 0)
         {
             if (abs(this_feature_ts - latest_gnss_time) > abs(tmp_last_feature_time - latest_gnss_time))
@@ -248,6 +306,7 @@ void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
             else
                 skip_parameter = 1 - (feature_msg_counter%2);   // skip next frame and afterwards
         }
+
         // cerr << "feature counter is " << feature_msg_counter << ", skip parameter is " << int(skip_parameter) << endl;
         tmp_last_feature_time = this_feature_ts;
     }
@@ -261,12 +320,24 @@ void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
     }
 }
 
+/**
+ * @brief 订阅VI传感器的外部触发信息（时间硬同步）
+ * 
+ * @details trigger_msg记录的是VI传感器被GNSS脉冲触发时的本地时间，也可以理解成图像的命名（以本地时间命名）
+ *          可以计算GNSS时间和本地时间的偏差，从而进行VI传感器的时间校正
+ * 
+ * @param trigger_msg 
+ */
 void local_trigger_info_callback(const gvins::LocalSensorExternalTriggerConstPtr &trigger_msg)
 {
     std::lock_guard<std::mutex> lg(m_time);
 
+    // 如果之前记录过PPS触发时间
     if (next_pulse_time_valid)
     {
+        // next_pulse_time记录了PPS触发时的GPS时间
+        // trigger_msg记录了VI传感器PPS触发时的本地时间
+        // time_diff_gnss_local记录了时间改正数：PPS触发时，VI传感器的本地时间和GPS时间的差值
         time_diff_gnss_local = next_pulse_time - trigger_msg->header.stamp.toSec();
         estimator_ptr->inputGNSSTimeDiff(time_diff_gnss_local);
         if (!time_diff_valid)       // just get calibrated
@@ -276,9 +347,17 @@ void local_trigger_info_callback(const gvins::LocalSensorExternalTriggerConstPtr
     }
 }
 
+/**
+ * @brief GNSS接收机的PPS触发信号的回调函数，内部存储PPS的触发时间
+ * 
+ * @param[in] tp_msg 
+ */
 void gnss_tp_info_callback(const GnssTimePulseInfoMsgConstPtr &tp_msg)
 {
+    // 先把GPS时间转成gtime_t数据结构
     gtime_t tp_time = gpst2time(tp_msg->time.week, tp_msg->time.tow);
+    
+    // 根据不同的卫星系统，将gps时间进一步处理
     if (tp_msg->utc_based || tp_msg->time_sys == SYS_GLO)
         tp_time = utc2gpst(tp_time);
     else if (tp_msg->time_sys == SYS_GAL)
@@ -290,11 +369,12 @@ void gnss_tp_info_callback(const GnssTimePulseInfoMsgConstPtr &tp_msg)
         std::cerr << "Unknown time system in GNSSTimePulseInfoMsg.\n";
         return;
     }
+
     double gnss_ts = time2sec(tp_time);
 
     std::lock_guard<std::mutex> lg(m_time);
-    next_pulse_time = gnss_ts;
-    next_pulse_time_valid = true;
+    next_pulse_time = gnss_ts;      // 记录PPS触发时间
+    next_pulse_time_valid = true;   // 设置下一个pps时间有效
 }
 
 void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
@@ -318,6 +398,10 @@ void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
     return;
 }
 
+/**
+ * @brief GVINS主程序，包含初始化，因子图优化
+ * 
+ */
 void process()
 {
     while (true)
@@ -455,12 +539,19 @@ int main(int argc, char **argv)
 
     ros::Subscriber sub_ephem, sub_glo_ephem, sub_gnss_meas, sub_gnss_iono_params;
     ros::Subscriber sub_gnss_time_pluse_info, sub_local_trigger_info;
+    
+    // GNSS相关
     if (GNSS_ENABLE)
     {
-        sub_ephem = n.subscribe(GNSS_EPHEM_TOPIC, 100, gnss_ephem_callback);
-        sub_glo_ephem = n.subscribe(GNSS_GLO_EPHEM_TOPIC, 100, gnss_glo_ephem_callback);
-        sub_gnss_meas = n.subscribe(GNSS_MEAS_TOPIC, 100, gnss_meas_callback);
-        sub_gnss_iono_params = n.subscribe(GNSS_IONO_PARAMS_TOPIC, 100, gnss_iono_params_callback);
+        // 1.订阅星历信息：卫星的位置、速度、时间偏差等信息
+        sub_ephem = n.subscribe(GNSS_EPHEM_TOPIC, 100, gnss_ephem_callback);                        //GPS, Galileo, BeiDou ephemeris
+        sub_glo_ephem = n.subscribe(GNSS_GLO_EPHEM_TOPIC, 100, gnss_glo_ephem_callback);            //GLONASS ephemeris
+
+        // 2.订阅卫星的观测信息
+        sub_gnss_meas = n.subscribe(GNSS_MEAS_TOPIC, 100, gnss_meas_callback);                      //GNSS raw measurement topic
+        
+        // 3.订阅电离层延时相关信息
+        sub_gnss_iono_params = n.subscribe(GNSS_IONO_PARAMS_TOPIC, 100, gnss_iono_params_callback); //GNSS broadcast ionospheric parameters
 
         if (GNSS_LOCAL_ONLINE_SYNC)
         {

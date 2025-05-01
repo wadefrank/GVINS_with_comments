@@ -302,38 +302,57 @@ namespace gnss_comm
     struct EphemBase
     {
         virtual ~EphemBase() = default;
-        uint32_t sat;                   /* satellite number */
-        gtime_t  ttr;                   /* transmission time in GPST */
-        gtime_t  toe;                   /* ephemeris reference time in GPST */
-        uint32_t health;                /* satellite health */
-        double   ura;                   /* satellite signal accuracy */
-        uint32_t iode;
+        uint32_t sat;                   /* satellite number, 卫星编号 */
+        gtime_t  ttr;                   /* transmission time in GPST(​​Global Positioning System Time​​), 信号发射时间 */
+        gtime_t  toe;                   /* ephemeris reference time in GPST, 星历参考时间, 指卫星轨道参数（如半长轴、偏心率、升交点赤经等）的​​基准时刻​​，通常用 ​​TOE​​（Time of Ephemeris）表示 */
+        uint32_t health;                /* satellite health, 卫星健康状态，标记卫星信号是否可用 */
+        double   ura;                   /* satellite signal accuracy, 用户测距精度, 表示卫星信号伪距的​​预期误差范围​​ */
+        uint32_t iode;                  /* Issue of Data, Ephemeris, 星历数据期号, 用于检测星历是否更新 */
     };
     typedef std::shared_ptr<EphemBase> EphemBasePtr;
 
     struct GloEphem : EphemBase
     {
-        int         freqo;              /* satellite frequency number */
-        uint32_t    age;                /* satellite age */
-        double      pos[3];             /* satellite position (ecef) (m) */
-        double      vel[3];             /* satellite velocity (ecef) (m/s) */
-        double      acc[3];             /* satellite acceleration (ecef) (m/s^2) */
-        double      tau_n, gamma;       /* SV clock bias (s)/relative freq bias */
-        double      delta_tau_n;        /* delay between L1 and L2 (s) */
+        int         freqo;              /* satellite frequency number, 卫星频率号, 标识 GLONASS 卫星的 ​​频分多址（FDMA）频率通道​​*/
+        uint32_t    age;                /* satellite age, 卫星数据龄期, 表示 ​星历更新的时间间隔​​ */
+        double      pos[3];             /* satellite position (ecef) (m), 卫星在地心地固坐标系（ECEF）中的​​位置坐标​​ */
+        double      vel[3];             /* satellite velocity (ecef) (m/s), 卫星在ECEF坐标系中的​速度分量​​ */
+        double      acc[3];             /* satellite acceleration (ecef) (m/s^2), 卫星在ECEF坐标系中的 ​​加速度分量​​ */
+        double      tau_n, gamma;       /* SV clock bias (s)/relative freq bias, 卫星钟相对于GLONASS系统时间的钟差​ ​和 卫星钟的​相对频率偏差系数*/
+        double      delta_tau_n;        /* delay between L1 and L2 (s), GLONASS 卫星 ​​L1 和 L2 信号间的硬件延迟差 */
     };
     typedef std::shared_ptr<GloEphem> GloEphemPtr;
 
     struct Ephem : EphemBase
     {
-        gtime_t     toc;                    /* clock correction reference time in GPST */
-        double      toe_tow;                /* toe seconds within the week */
-        uint32_t    week;
-        uint32_t    iodc;
-        uint32_t    code;
-        double      A, e, i0, omg, OMG0, M0, delta_n, OMG_dot, i_dot;       /* SV orbit parameters */
-        double      cuc, cus, crc, crs, cic, cis;
-        double      af0, af1, af2;          /* SV clock parameters */
-        double      tgd[2];                 /* group delay parameters */
+        gtime_t     toc;                    /* clock correction reference time in GPST, 时钟参数参考时间（Clock Reference Time），表示卫星钟差模型（af0, af1, af2）的 ​​基准时刻 */
+        double      toe_tow;                /* toe seconds within the week, 星历参考时间（TOE）的 ​​周内秒​​（Time of Week, TOW）*/
+        uint32_t    week;                   /* 星历参考时间（TOE）的 ​​GPS周数 */
+        uint32_t    iodc;                   /* 时钟数据期号（Issue of Data, Clock），标识卫星钟差模型的更新版本 */
+        uint32_t    code;                   /* 信号编码标识，表示卫星使用的 ​​信号调制类型与频段​​ */
+        double      A, e, i0, omg, OMG0, M0, delta_n, OMG_dot, i_dot;       /* SV orbit parameters 轨道参数（开普勒模型） */
+        /**
+         * A        轨道半长轴的平方根
+         * e        轨道偏心率
+         * i0       参考时刻的轨道倾角
+         * omg      近地点角距
+         * OMG0     参考时刻的升交点赤经
+         * M0       参考时刻的平近点角
+         * delta_n  平均运动角速度修正量
+         * OMG_dot  升交点赤经变化率（地球自转影响）
+         * i_dot    轨道倾角变化率
+         */
+        double      cuc, cus, crc, crs, cic, cis;   /* 谐波校正项​ */
+        /**
+         * cuc  纬度幅角余弦校正项
+         * cus  ​纬度幅角正弦校正项
+         * crc  轨道半径余弦校正项
+         * crs  轨道半径正弦校正项
+         * cic  轨道倾角余弦校正项
+         * cis  轨道倾角正弦校正项
+         */
+        double      af0, af1, af2;          /* SV(Space Vehicle) clock parameters, 时钟参数​ */
+        double      tgd[2];                 /* group delay parameters 群延迟参数（Timing Group Delay），表示信号在卫星硬件中的传播延迟差异 */
                                             /* GPS    :tgd[0]=TGD */
                                             /* GAL    :tgd[0]=BGD E5a/E1,tgd[1]=BGD E5b/E1 */
                                             /* BDS    :tgd[0]=BGD1,tgd[1]=BGD2 */

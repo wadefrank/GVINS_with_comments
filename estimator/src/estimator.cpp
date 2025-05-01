@@ -254,13 +254,23 @@ void Estimator::inputGNSSTimeDiff(const double t_diff)
     diff_t_gnss_local = t_diff;
 }
 
+/**
+ * @brief  输入当前帧图像匹配的gnss观测信息，进行处理后放到estimator的类成员变量中
+ * 
+ * @note 注意这里面会根据一些规则对接受到的卫星观测信息进行过滤，只会使用那种满足要求（比如比较稳定）的观测
+ * 
+ * @param gnss_meas 
+ */
 void Estimator::processGNSS(const std::vector<ObsPtr> &gnss_meas)
 {
     std::vector<ObsPtr> valid_meas;
     std::vector<EphemBasePtr> valid_ephems;
+
+    // 遍历所有的卫星观测信息
     for (auto obs : gnss_meas)
     {
         // filter according to system
+        // 1.首先过滤观测的卫星系统，必须是四大卫星系统
         uint32_t sys = satsys(obs->sat, NULL);
         if (sys != SYS_GPS && sys != SYS_GLO && sys != SYS_GAL && sys != SYS_BDS)
             continue;

@@ -69,6 +69,14 @@ namespace gnss_comm
         return ephem_msg;
     }
 
+    /**
+     * @brief 将GNSS星历消息转换为Ephem对象
+     * 
+     * @details 该函数用于解析GNSS卫星的导航电文消息，提取轨道参数、时钟校正等关键信息，并封装为Ephem对象，便于后续的卫星位置和速度计算。
+     * 
+     * @param gnss_ephem_msg GNSS星历消息的常量智能指针，包含原始导航电文数据
+     * @return EphemPtr 封装后的星历数据智能指针，包含转换后的时间和轨道参数
+     */
     EphemPtr msg2ephem(const GnssEphemMsgConstPtr &gnss_ephem_msg)
     {
         EphemPtr ephem(new Ephem());
