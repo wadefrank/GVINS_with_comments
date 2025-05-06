@@ -144,13 +144,25 @@ void update()
 
 }
 
+/**
+ * @brief 同步一帧图像和多个IMU、GNSS观测的数据
+ * 
+ * @param[out] imu_msg      上一帧图像时间到当前帧图像时间的所有IMU数据 + 大于当前帧图像时间的第一帧IMU数据
+ * @param[out] img_msg      图像特征数据
+ * @param[out] gnss_msg     GNSS数据（与当前帧图像时间戳的时间差不大于0.05s）
+ * @return true 
+ * @return false 
+ */
 bool getMeasurements(std::vector<sensor_msgs::ImuConstPtr> &imu_msg, sensor_msgs::PointCloudConstPtr &img_msg, std::vector<ObsPtr> &gnss_msg)
 {
+    // 注意这个地方很有意思，是按照顺序进行或的，也就是如果imu不是空，这里就能过去。
+    // 所以如果gnss一直收不到，那么也不影响单纯的VIO运行
     if (imu_buf.empty() || feature_buf.empty() || (GNSS_ENABLE && gnss_meas_buf.empty()))
         return false;
     
     double front_feature_ts = feature_buf.front()->header.stamp.toSec();
 
+    // 最新的IMU时间比图像时间还早，说明imu还没到
     if (!(imu_buf.back()->header.stamp.toSec() > front_feature_ts))
     {
         //ROS_WARN("wait for imu, only should happen at the beginning");
@@ -158,6 +170,8 @@ bool getMeasurements(std::vector<sensor_msgs::ImuConstPtr> &imu_msg, sensor_msgs
         return false;
     }
     double front_imu_ts = imu_buf.front()->header.stamp.toSec();
+
+    // 最老的图像时间比最老的IMU时间还老，那么只能把图像丢掉
     while (!feature_buf.empty() && front_imu_ts > front_feature_ts)
     {
         ROS_WARN("throw img, only should happen at the beginning");
@@ -165,10 +179,14 @@ bool getMeasurements(std::vector<sensor_msgs::ImuConstPtr> &imu_msg, sensor_msgs
         front_feature_ts = feature_buf.front()->header.stamp.toSec();
     }
 
+    //; ----------- 至此，就找到了和IMU能够对齐的图像时间 
+
     if (GNSS_ENABLE)
     {
-        front_feature_ts += time_diff_gnss_local;
+        front_feature_ts += time_diff_gnss_local;    // 补偿图像时间，和GNSS时间对齐
         double front_gnss_ts = time2sec(gnss_meas_buf.front()[0]->time);
+
+        // 把太老的GNSS数据全部丢掉
         while (!gnss_meas_buf.empty() && front_gnss_ts < front_feature_ts-MAX_GNSS_CAMERA_DELAY)
         {
             ROS_WARN("throw gnss, only should happen at the beginning");
@@ -176,11 +194,15 @@ bool getMeasurements(std::vector<sensor_msgs::ImuConstPtr> &imu_msg, sensor_msgs
             if (gnss_meas_buf.empty()) return false;
             front_gnss_ts = time2sec(gnss_meas_buf.front()[0]->time);
         }
+
+        // 疑问：如果是在室内，此时GNSS全部失效，那这里返回false，岂不是VIO都不能运行了？
         if (gnss_meas_buf.empty())
         {
             ROS_WARN("wait for gnss...");
             return false;
         }
+        // 如果在时间容忍范围内，则这个gnss观测数据就可以使用
+        // 疑问：但是为什么还是用了一个时间容忍来寻找呢?
         else if (abs(front_gnss_ts-front_feature_ts) < MAX_GNSS_CAMERA_DELAY)
         {
             gnss_msg = gnss_meas_buf.front();
@@ -191,7 +213,8 @@ bool getMeasurements(std::vector<sensor_msgs::ImuConstPtr> &imu_msg, sensor_msgs
     img_msg = feature_buf.front();
     feature_buf.pop();
 
-    while (imu_buf.front()->header.stamp.toSec() < img_msg->header.stamp.toSec() + estimator_ptr->td)
+    // 最后，把所有可用的IMU序列找出来（IMU时间戳小于相机时间戳+大于相机时间戳的第一帧IMU）
+    while (imu_buf.front()->header.stamp.toSec() < img_msg->header.stamp.toSec() + estimator_ptr->td)   // estimator_ptr->td = 0.0
     {
         imu_msg.emplace_back(imu_buf.front());
         imu_buf.pop();
@@ -298,7 +321,7 @@ void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
     {
         const double this_feature_ts = feature_msg->header.stamp.toSec()+time_diff_gnss_local;
         
-        // 如果已经接收到GNSS数据和图像特征数据，进行时间对齐
+        // 如果已经接收到GNSS数据和图像特征数据，进行图像滤除（图像频率20Hz，GNSS频率10Hz）
         if (latest_gnss_time > 0 && tmp_last_feature_time > 0)
         {
             if (abs(this_feature_ts - latest_gnss_time) > abs(tmp_last_feature_time - latest_gnss_time))
@@ -400,7 +423,6 @@ void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
 
 /**
  * @brief GVINS主程序，包含初始化，因子图优化
- * 
  */
 void process()
 {
@@ -408,21 +430,24 @@ void process()
     {
         std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
         std::vector<sensor_msgs::ImuConstPtr> imu_msg;
-        sensor_msgs::PointCloudConstPtr img_msg;
-        std::vector<ObsPtr> gnss_msg;
+        sensor_msgs::PointCloudConstPtr img_msg;    
+        std::vector<ObsPtr> gnss_msg;               // gnss的观测信息，对于一个图像帧，会有多个卫星的观测，因此是vector
 
+        // Step 1. 同步IMU、图像和GNSS数据
         std::unique_lock<std::mutex> lk(m_buf);
         con.wait(lk, [&]
-                 {
+                 {  // 这帧图像和上一帧图像之间包括：一帧图像特征点、多个IMU数据、多个gnss数据
                     return getMeasurements(imu_msg, img_msg, gnss_msg);
                  });
         lk.unlock();
         m_estimator.lock();
+
+        // Step 2. 执行IMU预积分
         double dx = 0, dy = 0, dz = 0, rx = 0, ry = 0, rz = 0;
         for (auto &imu_data : imu_msg)
         {
             double t = imu_data->header.stamp.toSec();
-            double img_t = img_msg->header.stamp.toSec() + estimator_ptr->td;
+            double img_t = img_msg->header.stamp.toSec() + estimator_ptr->td;   // estimator_ptr->td = 0.0
             if (t <= img_t)
             { 
                 if (current_time < 0)
@@ -440,7 +465,7 @@ void process()
                 //printf("imu: dt:%f a: %f %f %f w: %f %f %f\n",dt, dx, dy, dz, rx, ry, rz);
 
             }
-            else
+            else    // 针对最后一个imu数据，做一个简单的线性插值（插值到图像时间戳）
             {
                 double dt_1 = img_t - current_time;
                 double dt_2 = t - img_t;
@@ -461,11 +486,13 @@ void process()
             }
         }
 
+        // Step 3. 处理GNSS观测和星历信息，放到estimator的类成员变量中
         if (GNSS_ENABLE && !gnss_msg.empty())
             estimator_ptr->processGNSS(gnss_msg);
 
         ROS_DEBUG("processing vision data with stamp %f \n", img_msg->header.stamp.toSec());
 
+        // Step 4. 统计前端的特征点追踪信息
         TicToc t_s;
         map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
         for (unsigned int i = 0; i < img_msg->points.size(); i++)
@@ -485,8 +512,11 @@ void process()
             xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
             image[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
         }
+
+        // Step 5. 重点：后端优化
         estimator_ptr->processImage(image, img_msg->header);
 
+        // Step 6. 一次处理完成，进行一些统计信息计算
         double whole_t = t_s.toc();
         printStatistics(*estimator_ptr, whole_t);
         std_msgs::Header header = img_msg->header;
